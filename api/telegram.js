@@ -90,7 +90,7 @@ try {
         { $limit: 5 }
     ];
 
-    docs = await withTimeout(Telegram.aggregate(pipeline), 5_000, 'Search pipeline timeout');
+    docs = await withTimeout(Telegram.aggregate(pipeline), 5000, 'Search pipeline timeout');
     } catch (e) {
     // If Atlas Search misconfigured, don’t die—just fall back.
     console.error('Atlas Search error:', e);
