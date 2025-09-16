@@ -1,11 +1,21 @@
+// db.js
 const mongoose = require('mongoose');
 
-const connectToDB = () => {
-        const mongoUri = `mongodb+srv://rezamnf05_db_user:test_chatbot@test-chatbot.3baoozq.mongodb.net/chatbot?retryWrites=true&w=majority&appName=test-chatbot`
-        mongoose.connect(mongoUri)
-        const db = mongoose.connection
-        db.on('error', (error) => console.log(error));
-        db.once('open', () => console.log(`Connected to Database : ${db.name}`));
-}
+let cached = global._mongooseCached;
+if (!cached) cached = global._mongooseCached = { conn: null, promise: null };
 
-module.exports = connectToDB;
+module.exports = async function connectToDB() {
+  const uri = process.env.DATABASE_URL;  // put your URI in env
+  if (!uri) throw new Error('DATABASE_URL is not set');
+
+  if (cached.conn) return cached.conn;
+
+  if (!cached.promise) {
+    cached.promise = mongoose
+      .connect(uri, { dbName: 'chatbot' }) // ensures DB = chatbot
+      .then(() => mongoose.connection);
+  }
+
+  cached.conn = await cached.promise;
+  return cached.conn;
+};
