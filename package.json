@@ -11,7 +11,19 @@
   "devDependencies": {
     "nodemon": "^3.1.10"
   },
-    "scripts": {
+  "scripts": {
     "dev": "nodemon index.js"
-  }
+  },
+  "description": "",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/amisiroo/chatbot-telegram.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/amisiroo/chatbot-telegram/issues"
+  },
+  "homepage": "https://github.com/amisiroo/chatbot-telegram#readme"
 }
