@@ -136,9 +136,9 @@ module.exports = async (req, res) => {
   if (req.method !== 'POST') return res.status(200).send('OK');
 
   // Optional: verify Telegram secret header if you set one during setWebhook
-  if (secret && req.headers['x-telegram-bot-api-secret-token'] !== secret) {
-    return res.status(401).send('Unauthorized');
-  }
+//   if (secret && req.headers['x-telegram-bot-api-secret-token'] !== secret) {
+//     return res.status(401).send('Unauthorized');
+//   }
 
   try {
     await bot.processUpdate(req.body); // process Telegram update payload
