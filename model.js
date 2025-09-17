@@ -12,4 +12,4 @@ const TelegramSchema = new mongoose.Schema({
 }, { collection: 'telegram', timestamps: true });
 
 module.exports = mongoose.models.Telegram
-  || mongoose.model('Telegram', TelegramSchema);z
+  || mongoose.model('Telegram', TelegramSchema);
