@@ -1,22 +1,19 @@
-// /controller/telegramController.js
-const { withTimeout, escapeRegex, safeSend, sleep } = require('../utilities/helpers');
+const { withTimeout, escapeRegex, safeSend, sleep } = require('../utilities/helpers')
 
 async function processUpdate(botInstance, TelegramModel, update) {
-  const msg = update.message || update.edited_message;
-  const chatId = msg?.chat?.id;
-  const textIn = (msg?.text || '').trim();
+  const msg = update.message || update.edited_message
+  const chatId = msg?.chat?.id
+  const textIn = (msg?.text || '').trim()
 
-  if (!textIn) return;
+  if (!textIn) return
 
   if (process.env.BOT_DEBUG === 'true' && chatId) {
-    await safeSend(botInstance, chatId, `👋 Received: ${textIn}`);
+    await safeSend(botInstance, chatId, `👋 Received: ${textIn}`)
   }
 
-  const keyword = textIn;
-  const keywordLower = keyword.toLowerCase();
-  let docs = [];
-
-  // 1) Atlas Search
+  const keyword = textIn
+  const keywordLower = keyword.toLowerCase()
+  let docs = []
   try {
     const pipeline = [
       {
@@ -66,13 +63,11 @@ async function processUpdate(botInstance, TelegramModel, update) {
       },
       { $project: { _kw: 0, _blok: 0, _part: 0, _func: 0, _pfm: 0, _pe: 0, _pc: 0, _ra: 0 } },
       { $limit: 5 }
-    ];
-    docs = await withTimeout(TelegramModel.aggregate(pipeline), 5_000, 'Search pipeline timeout');
+    ]
+    docs = await withTimeout(TelegramModel.aggregate(pipeline), 5_000, 'Search pipeline timeout')
   } catch (e) {
-    console.error('Atlas Search error:', e);
+    console.error('Atlas Search error:', e)
   }
-
-  // 2) Fallback A: exact
   if (!Array.isArray(docs) || docs.length === 0) {
     try {
       docs = await withTimeout(
@@ -93,13 +88,11 @@ async function processUpdate(botInstance, TelegramModel, update) {
         'Fallback A timeout'
       );
     } catch (e) {
-      console.error('Fallback A error:', e);
+      console.error('Fallback A error:', e)
     }
   }
-
-  // 3) Fallback B: regex
   if (!Array.isArray(docs) || docs.length === 0) {
-    const rx = new RegExp(escapeRegex(keyword), 'i');
+    const rx = new RegExp(escapeRegex(keyword), 'i')
     try {
       docs = await withTimeout(
         TelegramModel.find({
@@ -119,13 +112,13 @@ async function processUpdate(botInstance, TelegramModel, update) {
         'Fallback B timeout'
       );
     } catch (e) {
-      console.error('Fallback B error:', e);
+      console.error('Fallback B error:', e)
     }
   }
 
   if (!docs || docs.length === 0) {
-    if (chatId) await safeSend(botInstance, chatId, `❌ Tidak ditemukan data untuk: ${keyword}`);
-    return;
+    if (chatId) await safeSend(botInstance, chatId, `❌ Tidak ditemukan data untuk: ${keyword}`)
+    return
   }
 
   for (const doc of docs) {
@@ -139,9 +132,9 @@ async function processUpdate(botInstance, TelegramModel, update) {
 ⚡️ *Possible Cause:* ${doc.possible_cause ?? '-'}
 ✅ *Recommendation:* ${doc.recommendation_actions ?? '-'}`;
 
-    if (chatId) await safeSend(botInstance, chatId, out, { parse_mode: 'Markdown' });
-    await sleep(250);
+    if (chatId) await safeSend(botInstance, chatId, out, { parse_mode: 'Markdown' })
+    await sleep(250)
   }
 }
 
-module.exports = { processUpdate };
+module.exports = { processUpdate }

@@ -1,5 +1,4 @@
-// model.js
-const mongoose = require('mongoose');
+const mongoose = require('mongoose')
 
 const TelegramSchema = new mongoose.Schema({
   blok_proses: String,
@@ -9,7 +8,9 @@ const TelegramSchema = new mongoose.Schema({
   possible_effect: String,
   possible_cause: String,
   recommendation_actions: String,
-}, { collection: 'telegram', timestamps: true });
+}, { 
+  collection: 'telegram', 
+  timestamps: true 
+})
 
-module.exports = mongoose.models.Telegram
-  || mongoose.model('Telegram', TelegramSchema);
+module.exports = mongoose.models.Telegram || mongoose.model('Telegram', TelegramSchema)
