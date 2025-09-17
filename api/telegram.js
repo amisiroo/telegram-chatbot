@@ -1,66 +1,124 @@
-// api/telegram.js
-// Vercel/Netlify-style HTTP webhook endpoint for node-telegram-bot-api.
-// - No polling
-// - Accepts Telegram webhooks and replies via sendMessage
-// - Robust DB + search fallbacks + timeouts
-// - Secret-token verification
+// /api/telegram.js  (CommonJS: no ESM imports here)
+// This is a crash-proof handler for Vercel serverless.
 
-const TelegramBot = require('node-telegram-bot-api');
-const connectToDB = require('../db');
-const Telegram = require('../model'); // your Mongoose model
+let TelegramBot;         // lazy load to avoid top-level crash
+let connectToDB;         // lazy import
+let TelegramModel;       // lazy import (Mongoose model)
+let bot;                 // initialized once per warm container
 
-const TOKEN  = process.env.BOT_TOKEN;
-const SECRET = process.env.BOT_SECRET; // must match Telegram setWebhook's secret_token
-const DEBUG  = process.env.BOT_DEBUG === 'true';
+async function getBot() {
+  if (bot) return bot;
 
-if (!TOKEN) throw new Error('BOT_TOKEN is not set');
+  // Lazy require to avoid ESM/CJS conflicts at import time
+  try {
+    TelegramBot = require('node-telegram-bot-api');
+  } catch (e) {
+    console.error('node-telegram-bot-api require error:', e);
+    return null;
+  }
 
-// Create a bot instance without polling or internal webHook listener
-const bot = new TelegramBot(TOKEN, { polling: false });
+  const TOKEN = process.env.BOT_TOKEN;
+  if (!TOKEN) {
+    console.error('BOT_TOKEN is not set (env)');
+    return null;
+  }
 
-// --- Ensure DB connection (cache connection in your /db module for serverless) ---
-let dbReadyPromise;
-try {
-  dbReadyPromise = connectToDB(); // should return a promise; don't block, await only inside handler
-} catch (e) {
-  console.error('DB connect immediate error:', e);
+  try {
+    bot = new TelegramBot(TOKEN, { polling: false }); // webhook mode
+    return bot;
+  } catch (e) {
+    console.error('Bot init error:', e);
+    return null;
+  }
 }
 
-// ---------------- Core search handler ----------------
-async function handleUpdate(update) {
-  // Support message or edited_message, ignore other update types safely
-  const msg = update.message || update.edited_message;
-  if (!msg) return;
-
-  const chatId = msg.chat?.id;
-  const textIn = (msg.text || '').trim();
-
-  if (!textIn) return;
-
-  if (DEBUG) {
-    await safeSend(bot, chatId, `👋 Received: ${textIn}`);
+async function getDB() {
+  // Lazy import DB and model; do NOT crash if missing
+  if (!connectToDB) {
+    try {
+      // Adjust the paths to your project layout
+      connectToDB = require('../db');
+    } catch (e) {
+      console.error('DB module require error:', e);
+      return null;
+    }
   }
-
-  // Wait DB (but bounded)
+  if (!TelegramModel) {
+    try {
+      TelegramModel = require('../model'); // your Mongoose model
+    } catch (e) {
+      console.error('Model require error:', e);
+      return null;
+    }
+  }
   try {
-    await withTimeout(dbReadyPromise, 5_000, 'DB connect timeout');
+    // Ensure connectToDB doesn’t throw; if it returns a promise, await with timeout
+    await withTimeout(Promise.resolve(connectToDB()), 5_000, 'DB connect timeout');
+    return { TelegramModel };
   } catch (e) {
-    console.error('DB not ready:', e);
-    // We can still reply something generic
-    await safeSend(bot, chatId, '⚠️ Database not ready. Please try again.');
-    return;
+    console.error('DB connect error:', e);
+    return null;
+  }
+}
+
+module.exports = async (req, res) => {
+  // Health check for GET (handy for testing in browser)
+  if (req.method !== 'POST') return res.status(200).send('OK');
+
+  // Secret header check (never crash)
+  const SECRET = process.env.BOT_SECRET;
+  if (SECRET) {
+    const got = req.headers['x-telegram-bot-api-secret-token'];
+    if (got !== SECRET) {
+      console.warn('Webhook denied: secret mismatch');
+      // Still return 401 (Telegram will keep trying)
+      return res.status(401).send('Unauthorized');
+    }
   }
 
+  // Parse Telegram update safely
+  const update = req.body || {};
+  const msg = update.message || update.edited_message;
+  const chatId = msg?.chat?.id;
+  const textIn = (msg?.text || '').trim();
+
+  // Initialize bot (never throw)
+  const botInstance = await getBot();
+  if (!botInstance) {
+    // Don’t crash; inform user if we can
+    if (chatId) await safeSend(null, chatId, '⚠️ Bot is not ready (token missing / init error).');
+    return res.status(200).send('OK');
+  }
+
+  // Quick path: if no text, just ACK
+  if (!textIn) return res.status(200).send('OK');
+
+  // Debug echo (optional)
+  if (process.env.BOT_DEBUG === 'true' && chatId) {
+    await safeSend(botInstance, chatId, `👋 Received: ${textIn}`);
+  }
+
+  // Try DB, but don’t die if fails
+  let db = await getDB();
+
+  // If DB not ready, reply gracefully
+  if (!db) {
+    if (chatId) await safeSend(botInstance, chatId, '⚠️ Database not ready. Please try again.');
+    return res.status(200).send('OK');
+  }
+
+  // ---- Query logic (safe & bounded) ----
+  const Telegram = db.TelegramModel;
   const keyword = textIn;
   const keywordLower = keyword.toLowerCase();
   let docs = [];
 
-  // ---------- 1) Atlas Search (phrase + strict equality CI) ----------
+  // 1) Atlas Search (if configured)
   try {
     const pipeline = [
       {
         $search: {
-          index: 'telegramIndex', // <-- ensure Atlas Search index name matches
+          index: 'telegramIndex', // change if your index is different
           phrase: {
             query: keyword,
             path: [
@@ -106,13 +164,12 @@ async function handleUpdate(update) {
       { $project: { _kw: 0, _blok: 0, _part: 0, _func: 0, _pfm: 0, _pe: 0, _pc: 0, _ra: 0 } },
       { $limit: 5 }
     ];
-
     docs = await withTimeout(Telegram.aggregate(pipeline), 5_000, 'Search pipeline timeout');
   } catch (e) {
     console.error('Atlas Search error:', e);
   }
 
-  // ---------- 2) Fallback A: exact-equal with collation (case-insensitive) ----------
+  // 2) Fallback A: exact + collation
   if (!Array.isArray(docs) || docs.length === 0) {
     try {
       docs = await withTimeout(
@@ -126,9 +183,7 @@ async function handleUpdate(update) {
             { possible_cause: keyword },
             { recommendation_actions: keyword }
           ]
-        }, null, { collation: { locale: 'id', strength: 1 } })
-          .limit(5)
-          .lean(),
+        }, null, { collation: { locale: 'id', strength: 1 } }).limit(5).lean(),
         4_000,
         'Fallback A timeout'
       );
@@ -137,7 +192,7 @@ async function handleUpdate(update) {
     }
   }
 
-  // ---------- 3) Fallback B: regex contains (case-insensitive) ----------
+  // 3) Fallback B: regex contains
   if (!Array.isArray(docs) || docs.length === 0) {
     const rx = new RegExp(escapeRegex(keyword), 'i');
     try {
@@ -152,9 +207,7 @@ async function handleUpdate(update) {
             { possible_cause: rx },
             { recommendation_actions: rx }
           ]
-        })
-          .limit(5)
-          .lean(),
+        }).limit(5).lean(),
         4_000,
         'Fallback B timeout'
       );
@@ -164,13 +217,12 @@ async function handleUpdate(update) {
   }
 
   if (!docs || docs.length === 0) {
-    await safeSend(bot, chatId, `❌ Tidak ditemukan data untuk: ${keyword}`);
-    return;
+    if (chatId) await safeSend(botInstance, chatId, `❌ Tidak ditemukan data untuk: ${keyword}`);
+    return res.status(200).send('OK');
   }
 
-  // Send results (small delay to avoid flood)
   for (const doc of docs) {
-    const text =
+    const out =
 `📌 *Failure Mode:* ${doc.possible_failure_modes ?? '-'}
 ⚙️ *Blok Proses:* ${doc.blok_proses ?? '-'}
 🔩 *Part Mesin:* ${doc.part_mesin ?? '-'}
@@ -180,56 +232,26 @@ async function handleUpdate(update) {
 ⚡️ *Possible Cause:* ${doc.possible_cause ?? '-'}
 ✅ *Recommendation:* ${doc.recommendation_actions ?? '-'}`;
 
-    await safeSend(bot, chatId, text, { parse_mode: 'Markdown' });
+    if (chatId) await safeSend(botInstance, chatId, out, { parse_mode: 'Markdown' });
     await sleep(250);
-  }
-}
-
-// ---------------- HTTP handler (Vercel/Netlify) ----------------
-module.exports = async (req, res) => {
-  // Telegram only POSTs; reply 200 on others so uptime checks don’t error
-  if (req.method !== 'POST') return res.status(200).send('OK');
-
-  // Enforce Telegram secret header if you configured one
-  if (SECRET) {
-    const got = req.headers['x-telegram-bot-api-secret-token'];
-    if (got !== SECRET) {
-      // Log what you got (but not the actual secret)
-      console.warn('Webhook denied: secret mismatch');
-      return res.status(401).send('Unauthorized');
-    }
-  }
-
-  try {
-    // Process exactly one update (Telegram posts updates individually by default)
-    await handleUpdate(req.body);
-  } catch (e) {
-    console.error('processUpdate error:', e);
-    // Always 200 so Telegram doesn’t back off
   }
 
   return res.status(200).send('OK');
 };
 
-// ---------------- helpers ----------------
-function escapeRegex(s) {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-function sleep(ms) {
-  return new Promise(r => setTimeout(r, ms));
-}
-async function withTimeout(promise, ms, label = 'timeout') {
+// ---------- helpers ----------
+function escapeRegex(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+async function withTimeout(promise, ms, label='timeout') {
   let t;
-  const timeout = new Promise((_, rej) => { t = setTimeout(() => rej(new Error(label)), ms); });
-  try {
-    return await Promise.race([promise, timeout]);
-  } finally {
-    clearTimeout(t);
-  }
+  const timeout = new Promise((_, rej) => t = setTimeout(() => rej(new Error(label)), ms));
+  try { return await Promise.race([promise, timeout]); }
+  finally { clearTimeout(t); }
 }
-async function safeSend(bot, chatId, text, opts) {
+async function safeSend(botInstance, chatId, text, opts) {
   try {
-    await bot.sendMessage(chatId, text, opts);
+    if (!botInstance) return;
+    await botInstance.sendMessage(chatId, text, opts);
   } catch (e) {
     console.error('sendMessage error:', e?.response?.body || e);
   }
